@@ -1,164 +1,164 @@
 import gradio as gr
 import requests
 import pandas as pd
-import json
+import os
 from datetime import datetime
 
 # ---------------------------------------------------------
 # 1. CONFIGURATION
 # ---------------------------------------------------------
-# Your active ngrok Webhook URL
 WEBHOOK_URL = "https://gratifiable-nonequably-israel.ngrok-free.dev/webhook/21c6802a-eb78-4a76-8d39-552ee0f73afa"
+HISTORY_FILE = "triage_history.csv"
 
 # ---------------------------------------------------------
-# 2. CORE LOGIC FUNCTION
+# 2. THE LOGIC
 # ---------------------------------------------------------
-def process_ticket(review_text, source, image_filepath=None):
-    """
-    Sends the review to n8n, analyzes sentiment, and prepares files for download.
-    """
-    
-    # A. Prepare the Payload for n8n
-    payload = {
-        "message": {
-            "content": review_text,
-            "source": source,
-            "has_attachment": True if image_filepath else False 
-        }
-    }
+def get_history():
+    """Loads history from CSV for the Gradio Dataframe."""
+    if os.path.exists(HISTORY_FILE):
+        try:
+            return pd.read_csv(HISTORY_FILE)
+        except:
+            pass
+    return pd.DataFrame(columns=["Timestamp", "Source", "Sentiment", "Score", "Reply"])
+
+def analyze_ticket(source_input, review_text):
+    payload = {"message": {"content": review_text, "source": source_input}}
     
     try:
-        # B. Send to n8n Webhook
+        # A. Trigger n8n
         response = requests.post(WEBHOOK_URL, json=payload)
-        response.raise_for_status()
+        response.raise_for_status() 
         data = response.json()
         
-        # C. Extract Data (Safely handle missing keys)
-        sentiment_score = data.get("sentiment_score", 0)
-        sentiment_label = data.get("sentiment_label", "Unknown")
-        summary = data.get("summary", "No summary provided.")
-        suggested_response = data.get("suggested_response", "No response generated.")
+        # --- SAFETY CHECK FOR n8n IF-ELSE PATHS ---
+        # Handles cases where the 'False' path returns an error or no data
+        if not data or (isinstance(data, dict) and "error" in data):
+            reason = data.get("error", "Criteria not met or manual review required.") if isinstance(data, dict) else "No data returned."
+            warning_html = f"""
+            <div style="background-color: #fff3cd; padding: 20px; border-radius: 10px; border: 1px solid #ffeeba; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+                <h3 style="margin-top: 0; color: #856404;">⚠️ Analysis Bypassed</h3>
+                <p style="color: #856404; font-weight: 500;">{reason}</p>
+                <div style="font-size: 0.8em; color: #856404; opacity: 0.8;">The n8n workflow followed the 'False' branch.</div>
+            </div>
+            """
+            return warning_html, "Manual review required.", get_history()
+        # ------------------------------------------
+
+        # B. Handle Batch Data (Successful path)
+        incoming_results = data if isinstance(data, list) else [data]
         
-        # D. Create Visual Report (Clean Markdown ONLY)
-        # Determine emoji based on score
-        emoji = "🔴" if int(sentiment_score) <= 5 else "🟢"
-        if 5 < int(sentiment_score) < 8:
-            emoji = "🟡"
+        target_item = None
+        new_entries = []
+        search_fingerprint = review_text[:20].lower()
+
+        for item in incoming_results:
+            sentiment = item.get("sentiment_label", "Unknown")
+            score = item.get("sentiment_score", "0")
+            reply = item.get("suggested_response", "No response generated.")
             
-        visual_report = f"""
-        # {emoji} Analysis Report
+            # Check for specific match to show on Dashboard
+            item_content = str(item.get("summary", "")) + str(item.get("Review", ""))
+            if search_fingerprint in item_content.lower():
+                target_item = item
+            
+            new_entries.append({
+                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "Source": item.get("source", source_input),
+                "Sentiment": sentiment,
+                "Score": score,
+                "Reply": reply[:50] + "..." if len(reply) > 50 else reply
+            })
         
-        | Metric | Value |
-        | :--- | :--- |
-        | **Sentiment** | **{sentiment_label}** ({sentiment_score}/10) |
-        | **Source** | {source} |
-        | **Attachment** | {"✅ Yes" if image_filepath else "❌ No"} |
+        # C. Update History Table
+        history_df = get_history()
+        history_df = pd.concat([pd.DataFrame(new_entries), history_df], ignore_index=True)
+        history_df.to_csv(HISTORY_FILE, index=False)
         
-        ### 📝 AI Summary
-        > *{summary}*
+        # D. Dashboard Display (High Contrast UI)
+        display_item = target_item if target_item else incoming_results[-1]
+        
+        sentiment = display_item.get("sentiment_label", "Unknown")
+        score = display_item.get("sentiment_score", "0")
+        reply = display_item.get("suggested_response", "No response.")
+        final_source = display_item.get("source", source_input)
+            
+        emoji = "🟢" if "Positive" in sentiment else "🔴" if "Negative" in sentiment else "🟡"
+        color = "green" if "Positive" in sentiment else "red" if "Negative" in sentiment else "#D4AF37"
+            
+        dashboard_html = f"""
+        <div style="background-color: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border: 1px solid #eee;">
+            <h3 style="margin-top: 0; color: #111; border-bottom: 2px solid #eee; padding-bottom: 10px;">📊 Latest Analysis</h3>
+            
+            <div style="display: flex; justify-content: space-between; margin: 15px 0;">
+                <span style="font-weight: bold; color: #333; font-size: 1.1em;">Source:</span>
+                <span style="color: #666; font-size: 1.1em;">{final_source}</span>
+            </div>
+            
+            <div style="display: flex; justify-content: space-between; margin-bottom: 15px;">
+                <span style="font-weight: bold; color: #333; font-size: 1.1em;">Sentiment:</span>
+                <span style="color: {color}; font-weight: bold; font-size: 1.1em;">{emoji} {sentiment}</span>
+            </div>
+            
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="font-weight: bold; color: #333; font-size: 1.1em;">Urgency Score:</span>
+                <span style="background-color: {color}; color: white; padding: 5px 15px; border-radius: 20px; font-weight: bold; font-size: 1em;">
+                    {score}/10
+                </span>
+            </div>
+        </div>
         """
         
-        # E. Create Downloadable CSV
-        df = pd.DataFrame([{
-            "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Source": source,
-            "Review": review_text,
-            "Sentiment": sentiment_label,
-            "Score": sentiment_score,
-            "Summary": summary,
-            "Suggested Response": suggested_response
-        }])
-        
-        csv_filename = "ticket_analysis_result.csv"
-        df.to_csv(csv_filename, index=False)
-        
-        # Return Report AND the clean Suggested Response text separately
-        return visual_report, suggested_response, csv_filename, data
+        return dashboard_html, reply, history_df
 
     except Exception as e:
-        # Error Handling
-        error_msg = f"❌ Error: {str(e)}"
-        return error_msg, "Error generating response.", None, {"error": str(e)}
+        error_msg = f"<div style='color: red; font-weight: bold;'>❌ Error: {str(e)}</div>"
+        return error_msg, "Failed to connect to n8n.", get_history()
 
 # ---------------------------------------------------------
-# 3. USER INTERFACE (Gradio Blocks)
+# 3. THE UI
 # ---------------------------------------------------------
-# Note: Moved 'theme' to the launch() call at the bottom to fix the warning
-with gr.Blocks(title="Smart Customer Router") as demo:
-    
-    # Header
-    gr.Markdown(
-        """
-        # 🤖 Smart Customer Service Router
-        **Analyze reviews, detect sentiment, and triage tickets automatically.**
-        """
-    )
+theme = gr.themes.Soft(primary_hue="indigo")
+
+with gr.Blocks(title="AI Support Manager") as demo:
+    gr.Markdown("# 🤖 Intelligent Support Manager")
     
     with gr.Row():
-        # --- LEFT COLUMN: INPUTS ---
+        # Left Side: Inputs & Examples
         with gr.Column(scale=1):
-            gr.Markdown("### 📥 New Ticket Input")
+            gr.Markdown("### 📥 New Ticket")
+            inp_source = gr.Dropdown(["Twitter", "Email", "Google Reviews"], label="Source", value="Email")
+            inp_text = gr.Textbox(label="Message", lines=5, placeholder="Paste customer feedback here...")
+            btn_submit = gr.Button("✨ Analyze Ticket", variant="primary")
             
-            input_source = gr.Dropdown(
-                ["Email Support", "Google Reviews", "Twitter", "Phone Transcript"], 
-                label="Source Platform", 
-                value="Email Support"
+            gr.Markdown("---")
+            gr.Examples(
+                examples=[
+                    ["Google Reviews", "The product arrived broken and customer service won't answer."],
+                    ["Email", "I just wanted to say thank you for the fast shipping!"],
+                    ["Twitter", "Your website is currently down. Is there an ETA for a fix?"]
+                ],
+                inputs=[inp_source, inp_text],
+                label="Quick Test Examples"
             )
-            
-            input_text = gr.Textbox(
-                label="Customer Review / Complaint", 
-                placeholder="Paste the customer's message here...", 
-                lines=5
-            )
-            
-            input_image = gr.Image(
-                label="Attach Photo Proof (Optional)", 
-                type="filepath", 
-                height=150
-            )
-            
-            submit_btn = gr.Button("🚀 Process Ticket", variant="primary", size="lg")
 
-        # --- RIGHT COLUMN: OUTPUTS ---
+        # Right Side: Results Dashboard
         with gr.Column(scale=1):
-            gr.Markdown("### 📊 Analysis Results")
-            
-            # 1. Visual Report (Top Half)
-            output_visual = gr.Markdown(label="Report Dashboard")
-            
-            # 2. Suggested Reply (Bottom Half - BIG BOX)
-            # FIXED: Removed 'show_copy_button=True' to prevent crash
-            output_reply = gr.Textbox(
-                label="🤖 Suggested Response (Copy & Paste)", 
-                lines=8
-            )
-            
-            # 3. Download Button
-            output_file = gr.File(label="Download Report (.csv)")
-            
-            # 4. Raw JSON (Hidden)
-            with gr.Accordion("See Raw Data (JSON)", open=False):
-                output_json = gr.JSON()
+            gr.Markdown("### 🧠 AI Analysis")
+            out_dashboard = gr.HTML(value="<div style='color: #666; font-style: italic; padding: 20px; border: 1px dashed #ccc; border-radius: 10px;'>Run analysis to see results...</div>")
+            out_reply = gr.Textbox(label="📝 Drafted Response", lines=8, interactive=False)
 
-    # --- CLICKABLE EXAMPLES ---
-    gr.Markdown("### ⚡ Quick Test Examples")
-    gr.Examples(
-        examples=[
-            ["This is the absolute worst product. It arrived broken and I want a refund!", "Email Support", None],
-            ["I just wanted to say thank you! The service was amazing and Mike was so helpful.", "Google Reviews", None],
-            ["Where is my package? The tracking number is 1Z999999999. This is a scam!", "Twitter", None]
-        ],
-        inputs=[input_text, input_source, input_image]
+    # Bottom: History Table
+    gr.Markdown("---")
+    gr.Markdown("### 🗄️ Processing History")
+    out_table = gr.Dataframe(value=get_history(), interactive=False, wrap=True)
+
+    # Connections
+    btn_submit.click(
+        fn=analyze_ticket,
+        inputs=[inp_source, inp_text],
+        outputs=[out_dashboard, out_reply, out_table]
     )
 
-    # Connect the Button to the Function
-    submit_btn.click(
-        fn=process_ticket, 
-        inputs=[input_text, input_source, input_image], 
-        outputs=[output_visual, output_reply, output_file, output_json] 
-    )
-
-# Launch the App
 if __name__ == "__main__":
-    # FIXED: Added theme here to satisfy the warning
-    demo.launch(theme=gr.themes.Soft())
+    demo.launch(theme=theme)
