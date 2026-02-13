@@ -1,4 +1,4 @@
-# Smart Customer Service Router
+# Smart Customer Router
 
 ### 🚀 Overview
 An AI-powered interface that automatically analyzes customer feedback, detects sentiment, and routes support tickets to the correct department without human intervention.
